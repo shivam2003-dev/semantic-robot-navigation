@@ -9,6 +9,57 @@ import argparse
 import os
 import sys
 import json
+import numpy as np
+
+
+def _show_annotated_frame(env, agent, result):
+    """Display the final RGB frame with detection bounding boxes annotated."""
+    import matplotlib
+    matplotlib.use("TkAgg")  # interactive backend so the window stays open
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    # Grab the current frame from the live controller
+    frame = env.controller.last_event.frame  # (H, W, 3) uint8
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 7))
+    ax.imshow(frame)
+
+    # Draw detections
+    for det in agent.last_detections[:5]:
+        x1, y1, x2, y2 = det.bbox
+        score = float(det.score)
+        label = det.label
+
+        rect = patches.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1,
+            linewidth=3, edgecolor="lime", facecolor="none",
+        )
+        ax.add_patch(rect)
+        ax.text(
+            x1, y1 - 8,
+            f"{label}  {score:.2f}",
+            color="white", fontsize=12, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="green", alpha=0.85),
+        )
+
+    status = "FOUND" if result.success else "NOT REACHED"
+    ax.set_title(
+        f"[{status}] \"{result.instruction}\" — {result.steps} steps, "
+        f"{result.final_distance:.2f}m away",
+        fontsize=13, fontweight="bold",
+    )
+    ax.axis("off")
+    plt.tight_layout()
+
+    # Save annotated frame
+    out_path = os.path.join(agent.log_dir, "annotated_final.png")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    print(f"[viz] Annotated frame saved → {out_path}")
+
+    # Show interactively (non-blocking so terminal prompt still works)
+    plt.show(block=False)
+    plt.pause(0.5)
 
 
 def main():
@@ -151,6 +202,19 @@ def main():
         print("[viz] Generating visualization from trajectory...")
         viz.replay_trajectory(result.trajectory, agent.mapper)
 
+    # Show annotated final frame (found or not)
+    if agent.last_detections or result.success:
+        _show_annotated_frame(env, agent, result)
+    else:
+        # Run grounding one last time on the final frame for annotation
+        final_frame = env.controller.last_event.frame
+        final_dets = grounder.score_frame(final_frame, agent.query)
+        agent.last_detections = final_dets
+        _show_annotated_frame(env, agent, result)
+
+    # Keep scene open for manual inspection — wait for user
+    print("\n[info] AI2-THOR scene is still open.")
+    input("[info] Press Enter to close the scene and exit...")
     env.close()
     return 0 if result.success else 1
 
