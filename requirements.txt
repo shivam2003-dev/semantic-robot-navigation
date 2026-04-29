@@ -1,0 +1,33 @@
+# Semantic Navigation Agent - Dependencies
+# Tested on Python 3.10, Ubuntu 22.04
+
+# Simulator
+ai2thor>=5.0.0
+
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Vision-Language Models
+transformers>=4.25.0
+git+https://github.com/openai/CLIP.git
+
+# NLP
+spacy>=3.5.0
+
+# Core
+numpy>=1.24.0
+opencv-python>=4.7.0
+matplotlib>=3.7.0
+networkx>=3.0
+Pillow>=9.4.0
+scikit-image>=0.20.0
+
+# Utilities
+imageio>=2.28.0
+tqdm>=4.65.0
+ftfy
+regex
+
+# Testing
+pytest>=7.3.0

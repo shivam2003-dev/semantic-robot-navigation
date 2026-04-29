@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# AI2-THOR cache
+.ai2thor/
+
+# Run artifacts
+runs/
+debug/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Model caches
+*.pt
+*.pth
+*.bin
+!tests/fixtures/*
