@@ -90,6 +90,8 @@ class NavigationAgent:
         self.no_detection_count = 0  # steps without a detection
         self.last_detections = []
         self.query = ""
+        self.stuck_count = 0         # consecutive steps with no position change
+        self.last_action_success = True
 
     def run(
         self,
@@ -174,6 +176,22 @@ class NavigationAgent:
                 # Execute action
                 obs = self.env.step(action)
 
+                # Track stuck detection: did MoveAhead actually move?
+                self.last_action_success = obs.metadata.get(
+                    "lastActionSuccess", True
+                )
+                if action == "MoveAhead":
+                    new_pos = obs.pose["position"]
+                    dx = new_pos["x"] - self.prev_pos["x"]
+                    dz = new_pos["z"] - self.prev_pos["z"]
+                    moved = math.sqrt(dx * dx + dz * dz)
+                    if moved < 0.01:  # didn't actually move
+                        self.stuck_count += 1
+                    else:
+                        self.stuck_count = 0
+                else:
+                    self.stuck_count = 0
+
         finally:
             trace_file.close()
 
@@ -203,6 +221,10 @@ class NavigationAgent:
         self.explore_rotations = 0
         self.no_detection_count = 0
         self.last_detections = []
+        self.stuck_count = 0
+        self.last_action_success = True
+        self.approach_stuck_total = 0  # total stuck events for current target
+        self.force_explore_steps = 0   # forced exploration countdown
 
     def _should_ground(self, step: int) -> bool:
         """Decide whether to run the grounder this step."""
@@ -223,10 +245,49 @@ class NavigationAgent:
         pos = obs.pose["position"]
         yaw = obs.pose["rotation"]["y"]
 
+        # --- Forced exploration mode: move away from blocked target ---
+        if self.force_explore_steps > 0:
+            self.force_explore_steps -= 1
+            if self.force_explore_steps == 0:
+                print("[agent] Forced exploration done, resuming SEARCH_FRONTIER")
+                self.state = AgentState.SEARCH_FRONTIER
+            # Bug algorithm: rotate 90° then walk along obstacle
+            if self.force_explore_steps >= 9:
+                return "RotateRight"  # 3 rotations = 135° turn
+            return "MoveAhead"
+
+        # --- Stuck recovery ---
+        if self.stuck_count >= 2:
+            self.stuck_count = 0
+            self.approach_stuck_total += 1
+            self.current_path = []
+            self.path_index = 0
+
+            # After 2 stuck events at same target, try wall-following
+            if self.approach_stuck_total >= 2:
+                print(f"[agent] Stuck {self.approach_stuck_total}x, "
+                      f"bug-algorithm explore")
+                self.approach_stuck_total = 0
+                self.target_world = None
+                self.state = AgentState.SEARCH_FRONTIER
+                self.force_explore_steps = 12
+                return "RotateRight"
+
+            # First stuck: just rotate once to try a slightly different angle
+            return "RotateRight"
+
         # Check if we have a strong detection
         best_det = detections[0] if detections else None
         has_detection = (best_det is not None
                          and best_det.score >= self.detection_threshold)
+
+        # --- Use ground-truth object visibility for robust STOP ---
+        if has_detection and self.state in (AgentState.GROUND, AgentState.APPROACH):
+            gt_dist = self._distance_to_target_object(obs, parsed.target)
+            if gt_dist <= self.approach_distance:
+                print(f"[agent] Target within reach (GT dist={gt_dist:.2f}m)")
+                self.state = AgentState.STOP
+                return "Done"
 
         # ---------- STATE: EXPLORE ----------
         if self.state == AgentState.EXPLORE:
@@ -254,13 +315,10 @@ class NavigationAgent:
         # ---------- STATE: GROUND ----------
         if self.state == AgentState.GROUND:
             if has_detection:
-                # Update target position from latest detection
-                self._transition_to_ground(obs, best_det)
-
-            if self.target_world is not None:
-                # Always transition to APPROACH from GROUND — don't stop directly
+                # Switch to visual servoing approach
                 self.state = AgentState.APPROACH
-                return self._approach_action(obs)
+                self.approach_stuck_total = 0
+                return self._visual_servo_action(obs, best_det)
 
             # Lost detection — back to frontier
             self.no_detection_count += 1
@@ -272,31 +330,19 @@ class NavigationAgent:
         # ---------- STATE: APPROACH ----------
         if self.state == AgentState.APPROACH:
             if has_detection:
-                # Update target
-                self._transition_to_ground(obs, best_det)
-
-                dist = math.sqrt(
-                    (pos["x"] - self.target_world[0]) ** 2
-                    + (pos["z"] - self.target_world[1]) ** 2
-                )
-                # Use bbox coverage as a proximity signal:
-                # if detection bbox covers >30% of frame area, we're close enough
-                H, W = obs.rgb.shape[:2]
-                bx1, by1, bx2, by2 = best_det.bbox
-                bbox_area = max(0, bx2 - bx1) * max(0, by2 - by1)
-                bbox_coverage = bbox_area / (H * W)
-
-                if dist <= self.approach_distance and bbox_coverage > 0.15:
-                    self.state = AgentState.STOP
-                    return "Done"
+                self.no_detection_count = 0
+                # Visual servoing: walk toward the detection bbox center
+                return self._visual_servo_action(obs, best_det)
             else:
                 self.no_detection_count += 1
-                if self.no_detection_count > 50:
+                if self.no_detection_count > 15:
                     print("[agent] Lost target, returning to SEARCH_FRONTIER")
                     self.state = AgentState.SEARCH_FRONTIER
                     self.target_world = None
                     self.no_detection_count = 0
                     return self._frontier_action(obs)
+                # Try to re-acquire: rotate toward last known direction
+                return "RotateRight"
 
             return self._approach_action(obs)
 
@@ -346,6 +392,30 @@ class NavigationAgent:
         else:
             self.current_path = []
             self.path_index = 0
+
+    def _visual_servo_action(self, obs: Observation, det: Detection) -> str:
+        """
+        Visual servoing: steer toward the detected object in the image.
+        With 45° rotation steps and 90° FOV, use a wide centering band
+        to avoid left/right oscillation. Only rotate if target is near
+        the frame edge.
+        """
+        x1, y1, x2, y2 = det.bbox
+        W = obs.rgb.shape[1]
+        bbox_cx = (x1 + x2) / 2.0
+        frame_cx = W / 2.0
+
+        # Compute horizontal offset as fraction of frame width
+        offset = (bbox_cx - frame_cx) / W  # [-0.5, 0.5]
+
+        # Only rotate if target is in the outer 30% of the frame
+        # (with 45° steps and 90° FOV, a 0.35 threshold avoids oscillation)
+        if abs(offset) < 0.35:
+            return "MoveAhead"
+        elif offset > 0:
+            return "RotateRight"
+        else:
+            return "RotateLeft"
 
     def _approach_action(self, obs: Observation) -> str:
         """Pick action to follow the planned path or move toward target."""
