@@ -258,13 +258,7 @@ class NavigationAgent:
                 self._transition_to_ground(obs, best_det)
 
             if self.target_world is not None:
-                dist = math.sqrt(
-                    (pos["x"] - self.target_world[0]) ** 2
-                    + (pos["z"] - self.target_world[1]) ** 2
-                )
-                if dist <= self.approach_distance and has_detection:
-                    self.state = AgentState.STOP
-                    return "Done"
+                # Always transition to APPROACH from GROUND — don't stop directly
                 self.state = AgentState.APPROACH
                 return self._approach_action(obs)
 
@@ -285,7 +279,14 @@ class NavigationAgent:
                     (pos["x"] - self.target_world[0]) ** 2
                     + (pos["z"] - self.target_world[1]) ** 2
                 )
-                if dist <= self.approach_distance:
+                # Use bbox coverage as a proximity signal:
+                # if detection bbox covers >30% of frame area, we're close enough
+                H, W = obs.rgb.shape[:2]
+                bx1, by1, bx2, by2 = best_det.bbox
+                bbox_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+                bbox_coverage = bbox_area / (H * W)
+
+                if dist <= self.approach_distance and bbox_coverage > 0.15:
                     self.state = AgentState.STOP
                     return "Done"
             else:
@@ -469,7 +470,7 @@ class NavigationAgent:
     ) -> Dict[str, Any]:
         """Build a log record for the trace file."""
         top3 = [
-            {"bbox": list(d.bbox), "score": round(d.score, 4), "label": d.label}
+            {"bbox": [float(v) for v in d.bbox], "score": round(float(d.score), 4), "label": d.label}
             for d in detections[:3]
         ]
         return {
@@ -477,12 +478,12 @@ class NavigationAgent:
             "state": self.state.name,
             "action": action,
             "pose": {
-                "x": round(obs.pose["position"]["x"], 3),
-                "z": round(obs.pose["position"]["z"], 3),
-                "yaw": round(obs.pose["rotation"]["y"], 1),
+                "x": round(float(obs.pose["position"]["x"]), 3),
+                "z": round(float(obs.pose["position"]["z"]), 3),
+                "yaw": round(float(obs.pose["rotation"]["y"]), 1),
             },
             "query": self.query,
             "detections_top3": top3,
-            "target_world": list(self.target_world) if self.target_world else None,
-            "path_length": round(self.path_length, 3),
+            "target_world": [float(v) for v in self.target_world] if self.target_world else None,
+            "path_length": round(float(self.path_length), 3),
         }

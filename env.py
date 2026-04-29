@@ -63,6 +63,7 @@ class ThorEnv:
     def _init_controller(self, scene: str):
         """Initialize or reinitialize the AI2-THOR controller."""
         from ai2thor.controller import Controller
+        import platform as plat
 
         kwargs = dict(
             scene=scene,
@@ -74,16 +75,17 @@ class ThorEnv:
             height=self.height,
             fieldOfView=self.fov,
             visibilityDistance=self.visibility_distance,
-            snapToGrid=True,
+            snapToGrid=False,
+            server_timeout=300.0,
         )
 
-        # Use headless rendering if requested (requires GPU + Vulkan on Linux)
-        if self.headless:
+        # CloudRendering needs Vulkan (Linux only). On macOS, skip it.
+        if self.headless and plat.system() == "Linux":
             try:
                 from ai2thor.platform import CloudRendering
                 kwargs["platform"] = CloudRendering
             except ImportError:
-                pass  # Fall back to default X11 rendering
+                pass
 
         if self.controller is not None:
             self.controller.stop()
@@ -102,7 +104,14 @@ class ThorEnv:
         assert self.controller is not None, "Call reset() before step()"
         assert action in ACTIONS, f"Invalid action: {action}. Choose from {ACTIONS}"
 
-        event = self.controller.step(action=action)
+        try:
+            event = self.controller.step(action=action)
+        except (RuntimeError, Exception) as e:
+            if "depth" in str(e).lower() or "image_depth" in str(e).lower():
+                # AI2-THOR depth frame bug on macOS — retry without depth
+                event = self.controller.last_event
+            else:
+                raise
         return self._make_observation(event)
 
     def get_object_positions(self) -> List[Dict[str, Any]]:

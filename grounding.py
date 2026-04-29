@@ -127,9 +127,16 @@ class VLGrounder:
         outputs = self.owlvit_model(**inputs)
 
         target_sizes = torch.tensor([[H, W]], device=self.device)
-        results = self.owlvit_processor.post_process_object_detection(
-            outputs, threshold=self.detection_threshold, target_sizes=target_sizes
-        )[0]
+
+        # Handle API change in transformers >= 5.x
+        if hasattr(self.owlvit_processor, "post_process_object_detection"):
+            results = self.owlvit_processor.post_process_object_detection(
+                outputs, threshold=self.detection_threshold, target_sizes=target_sizes
+            )[0]
+        else:
+            results = self.owlvit_processor.post_process_grounded_object_detection(
+                outputs, threshold=self.detection_threshold, target_sizes=target_sizes
+            )[0]
 
         boxes = results["boxes"].cpu().numpy()    # (N, 4) x1,y1,x2,y2
         scores = results["scores"].cpu().numpy()  # (N,)

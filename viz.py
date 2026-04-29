@@ -130,8 +130,8 @@ class NavigationVisualizer:
 
         # Convert figure to array
         fig.canvas.draw()
-        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        buf = np.asarray(fig.canvas.buffer_rgba())
+        img = buf[:, :, :3].copy()  # RGBA -> RGB
 
         if save:
             path_out = os.path.join(self.save_dir, f"frame_{self.frame_count:04d}.png")
